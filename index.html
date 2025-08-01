@@ -1,0 +1,206 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>特典配布システム（GitHub連携・完全版）</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+    <h1>特典配布システム</h1>
+
+    <label>GitHubトークン：</label>
+    <input type="password" id="githubToken" placeholder="GitHub Personal Access Token">
+    <button onclick="clearToken()">🗑️削除</button><br><br>
+
+    <label>会員番号：</label>
+    <input type="text" id="memberNumber">
+    <button onclick="startScan()">📷 スキャン</button><br><br>
+
+    <label>スタッフ名：</label>
+    <input type="text" id="staffName"><br><br>
+
+    <label>イベント日：</label>
+    <input type="date" id="eventDate"><br><br>
+
+    <button onclick="submitDistribution()">特典配布</button>
+    <button onclick="downloadCSV()">CSV出力</button>
+
+    <div id="result" style="margin-top:20px; color:green;"></div>
+
+    <h2>集計情報</h2>
+    <div id="summary"></div>
+
+    <h2>配布履歴</h2>
+    <table border="1">
+        <thead>
+            <tr><th>日時</th><th>会員番号</th><th>スタッフ</th><th>イベント日</th></tr>
+        </thead>
+        <tbody id="historyTable"></tbody>
+    </table>
+
+    <div id="reader" style="width:300px; margin-top:20px;"></div>
+
+    <script>
+        const REPO = "kosuk147/system_fcservice";
+        const FILE_PATH = "distribution-history.json";
+        let history = [];
+
+        function getToken() {
+            const tokenField = document.getElementById('githubToken');
+            let token = tokenField.value.trim();
+            if (!token && localStorage.getItem('githubToken')) {
+                token = localStorage.getItem('githubToken');
+                tokenField.value = token;
+            }
+            if (token) {
+                localStorage.setItem('githubToken', token);
+            }
+            return token;
+        }
+
+        function clearToken() {
+            localStorage.removeItem('githubToken');
+            document.getElementById('githubToken').value = '';
+            alert("トークンを削除しました。");
+        }
+
+        async function loadHistory() {
+            const res = await fetch(`https://raw.githubusercontent.com/${REPO}/main/${FILE_PATH}`);
+            return await res.json();
+        }
+
+        async function saveHistory(newData, token) {
+            const apiUrl = `https://api.github.com/repos/${REPO}/contents/${FILE_PATH}`;
+            const getRes = await fetch(apiUrl, {
+                headers: { "Authorization": `token ${token}` }
+            });
+            const fileInfo = await getRes.json();
+            const sha = fileInfo.sha;
+
+            const content = btoa(unescape(encodeURIComponent(JSON.stringify(newData, null, 2))));
+
+            const putRes = await fetch(apiUrl, {
+                method: "PUT",
+                headers: {
+                    "Authorization": `token ${token}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    message: "Update distribution history",
+                    content: content,
+                    sha: sha
+                })
+            });
+
+            return await putRes.json();
+        }
+
+        async function submitDistribution() {
+            const token = getToken();
+            const memberNumber = document.getElementById('memberNumber').value.trim();
+            const staffName = document.getElementById('staffName').value.trim();
+            const eventDate = document.getElementById('eventDate').value;
+            const resultEl = document.getElementById('result');
+
+            if (!token || !memberNumber || !staffName || !eventDate) {
+                resultEl.style.color = 'red';
+                resultEl.innerText = "⚠ すべての項目を入力してください。";
+                return;
+            }
+
+            try {
+                history = await loadHistory();
+                const duplicate = history.find(r => r.memberNumber === memberNumber && r.eventDate === eventDate);
+                if (duplicate) {
+                    resultEl.style.color = 'red';
+                    resultEl.innerText = `❌ ${memberNumber} は ${eventDate} に既に配布済みです。`;
+                    return;
+                }
+
+                const newRecord = {
+                    timestamp: new Date().toISOString(),
+                    memberNumber,
+                    staffName,
+                    eventDate
+                };
+                history.push(newRecord);
+                await saveHistory(history, token);
+
+                resultEl.style.color = 'green';
+                resultEl.innerText = `✅ 配布完了：${memberNumber}`;
+                document.getElementById('memberNumber').value = '';
+                updateDisplay();
+            } catch (e) {
+                console.error(e);
+                resultEl.style.color = 'red';
+                resultEl.innerText = "⚠ エラーが発生しました。";
+            }
+        }
+
+        function updateDisplay() {
+            const table = document.getElementById('historyTable');
+            const summary = document.getElementById('summary');
+            table.innerHTML = "";
+            let staffMap = {}, members = new Set();
+
+            history.slice().reverse().forEach(r => {
+                const row = `<tr>
+                    <td>${new Date(r.timestamp).toLocaleString("ja-JP")}</td>
+                    <td>${r.memberNumber}</td>
+                    <td>${r.staffName}</td>
+                    <td>${r.eventDate}</td>
+                </tr>`;
+                table.innerHTML += row;
+                members.add(r.memberNumber);
+                if (!staffMap[r.staffName]) staffMap[r.staffName] = 0;
+                staffMap[r.staffName]++;
+            });
+
+            summary.innerHTML = `
+                <p>配布件数: ${history.length}</p>
+                <p>ユニーク会員数: ${members.size}</p>
+                <p>スタッフ別:</p>
+                <ul>${Object.entries(staffMap).map(([name, count]) => `<li>${name}: ${count}件</li>`).join("")}</ul>
+            `;
+        }
+
+        function downloadCSV() {
+            let csv = "日時,会員番号,スタッフ名,イベント日\n";
+            history.forEach(r => {
+                csv += `"${new Date(r.timestamp).toLocaleString("ja-JP")}","${r.memberNumber}","${r.staffName}","${r.eventDate}"\n`;
+            });
+            const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = "配布履歴.csv";
+            link.click();
+        }
+
+        function startScan() {
+            const html5QrCode = new Html5Qrcode("reader");
+            html5QrCode.start({ facingMode: "environment" }, {
+                fps: 10,
+                qrbox: 250
+            }, (decodedText) => {
+                document.getElementById("memberNumber").value = decodedText;
+                html5QrCode.stop();
+                document.getElementById("reader").innerHTML = "";
+            }, (err) => {}).catch(err => console.error(err));
+        }
+
+        window.onload = async () => {
+            if (localStorage.getItem('githubToken')) {
+                document.getElementById('githubToken').value = localStorage.getItem('githubToken');
+            }
+            try {
+                history = await loadHistory();
+                updateDisplay();
+            } catch (e) {
+                console.error("初期読み込みエラー", e);
+            }
+        }
+    </script>
+</body>
+</html>
